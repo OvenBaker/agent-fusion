@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# fusion — launch an Agent Fusion run (see ~/agents/agent-fusion.md) as a cockpit
+# workspace: scaffold the shared RUN_DIR, open a named workspace, and start each
+# agent in its own pane with its role header + "read the harness" opening prompt.
+#
+#   fusion [opts] <slug> <task-file>     # task from a file
+#   fusion [opts] <slug> -               # task from stdin
+#   fusion [opts] <slug> -m "task text"  # task inline
+#
+# Options
+#   --mode A|B     A = 2-agent self-integrating (default); B = 3-role conductor
+#   --auto         agents run unattended (skip permission prompts). Default: interactive.
+#   --cwd DIR      working dir for the agents (default: the RUN_DIR). Use a repo for code runs.
+#   --force        reuse a non-empty RUN_DIR (resume/overwrite scaffold). Default: refuse.
+#   --dry-run      print what would happen; touch nothing in tmux.
+#
+# Mode A panes:  PRIMARY (claude) · SECONDARY (codex)
+# Mode B panes:  ARBITER (claude) · WORKER_A (claude) · WORKER_B (codex)
+set -euo pipefail
+
+FUSION_DIR="${FUSION_DIR:-$HOME/agents}"
+HARNESS="$FUSION_DIR/agent-fusion.md"
+LIB="$FUSION_DIR/fusion-lib.sh"
+RUNS="$FUSION_DIR/runs"
+TMUX="${COCKPIT_TMUX:-tmux -L cockpit}"
+SESSION="${COCKPIT_SESSION:-cockpit}"
+LAYOUT="${COCKPIT_LAYOUT:-even-horizontal}"
+
+die() { printf 'fusion: %s\n' "$*" >&2; exit 1; }
+
+MODE=A AUTO=0 FORCE=0 DRY=0 CWD="" TASK_INLINE="" SLUG="" TASKSRC=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode) MODE="${2:?}"; shift;;
+    --auto) AUTO=1;;
+    --cwd)  CWD="${2:?}"; shift;;
+    --force) FORCE=1;;
+    --dry-run) DRY=1;;
+    -m) TASK_INLINE="${2:?}"; shift;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0;;
+    -*) die "unknown option: $1";;
+    *)  if [[ -z "$SLUG" ]]; then SLUG="$1"; elif [[ -z "$TASKSRC" ]]; then TASKSRC="$1"; else die "unexpected arg: $1"; fi;;
+  esac
+  shift
+done
+
+MODE="${MODE^^}"
+[[ "$MODE" == A || "$MODE" == B ]] || die "--mode must be A or B (got '$MODE')"
+[[ -n "$SLUG" ]] || die "need a run slug, e.g.  fusion my-investigation task.md"
+[[ "$SLUG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "slug must be a safe folder name: '$SLUG'"
+[[ -f "$HARNESS" ]] || die "harness not found: $HARNESS"
+[[ -f "$LIB" ]] || die "fusion-lib not found: $LIB"
+
+# --- gather the task text (inline -m, else file/stdin) ---------------------------
+task=""
+if [[ -n "$TASK_INLINE" ]]; then
+  task="$TASK_INLINE"
+elif [[ "$TASKSRC" == "-" ]]; then
+  task="$(cat)"
+elif [[ -n "$TASKSRC" ]]; then
+  [[ -f "$TASKSRC" ]] || die "task file not found: $TASKSRC"
+  task="$(cat "$TASKSRC")"
+else
+  die "no task: pass a task file, '-' for stdin, or -m \"text\""
+fi
+[[ -n "${task//[[:space:]]/}" ]] || die "task is empty"
+
+RUN_DIR="$RUNS/$SLUG"
+[[ -z "$CWD" ]] && CWD="$RUN_DIR"
+
+if [[ -e "$RUN_DIR" && -n "$(ls -A "$RUN_DIR" 2>/dev/null)" && "$FORCE" -ne 1 ]]; then
+  die "RUN_DIR exists and is non-empty: $RUN_DIR  (use --force to reuse)"
+fi
+
+# --- role table: "ROLE:runtime"; first entry is always the bootstrapper ----------
+if [[ "$MODE" == A ]]; then ROLES=(PRIMARY:claude SECONDARY:codex)
+else                        ROLES=(ARBITER:claude WORKER_A:claude WORKER_B:codex); fi
+
+runtime_label() { case "$1" in codex) echo "Codex CLI";; *) echo "Claude Code / Opus";; esac; }
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# Opening prompt handed to an agent as its first message (positional arg).
+build_prompt() {
+  local role="$1" runtime="$2" boot="$3" rlabel; rlabel="$(runtime_label "$runtime")"
+  local setup waitnote
+  # §4: Claude Code can't foreground-sleep; Codex (shell-first) waits in the foreground.
+  if [[ "$runtime" == codex ]]; then
+    waitnote="When you wait on a peer marker, call fusion_wait in the foreground."
+  else
+    waitnote="When you wait on a peer marker, run fusion_wait with run_in_background:true (you're re-invoked when it returns) or use the Monitor tool — never foreground-sleep."
+  fi
+  if [[ "$boot" == 1 ]]; then
+    setup="You are the BOOTSTRAPPER. The deterministic scaffold already exists: task.md (the immutable task — read it, never rewrite it), control/ (with fusion-lib.sh + roles.json), and the plan/stages/etc. dirs. Do the remainder of Phase 0 only: source the lib, establish your heartbeat with fusion_log \"bootstrap\", then create control/RUN.started — the other agent(s) are waiting on that marker. Then proceed through the phases for your role. $waitnote"
+  else
+    setup="The shared folder is already scaffolded; task.md is the immutable task — read it. First wait for control/RUN.started before doing role work, then proceed per your role. $waitnote"
+  fi
+  cat <<PROMPT
+You are one agent in an Agent Fusion run. BEFORE doing anything, read the harness in full: $HARNESS
+
+YOUR HEADER:
+  MODE    = $MODE
+  RUN_DIR = $RUN_DIR
+  ROLE    = $role
+  RUNTIME = $rlabel
+
+Run this setup first (exports are required by the lib):
+  export RUN_DIR="$RUN_DIR" ROLE="$role"
+  source "$LIB"
+
+$setup
+
+Reconcile with $RUN_DIR on every (re)start and resume from whichever phase the markers indicate. Follow the harness exactly: blind-first gated on markers, converge the frame / diverge the approach, dissent is mandatory, own your namespace, marker-after-content, keep working your own thread if a peer stalls, watch HOLD/ABORT.
+PROMPT
+}
+
+# --- scaffold -------------------------------------------------------------------
+scaffold() {
+  local d
+  local dirs=(control plan stages decisions log deliverables)
+  [[ "$MODE" == B ]] && dirs+=(contract beacons steering)
+  if [[ "$DRY" == 1 ]]; then
+    printf '[dry] mkdir -p %s/{%s}\n' "$RUN_DIR" "$(IFS=,; echo "${dirs[*]}")"
+    printf '[dry] write %s/task.md (%d bytes)\n' "$RUN_DIR" "${#task}"
+    printf '[dry] cp %s -> %s/control/fusion-lib.sh\n' "$LIB" "$RUN_DIR"
+    printf '[dry] write %s/control/roles.json, %s/README.md\n' "$RUN_DIR" "$RUN_DIR"
+    return
+  fi
+  for d in "${dirs[@]}"; do mkdir -p "$RUN_DIR/$d"; done
+  printf '%s' "$task" > "$RUN_DIR/task.md.tmp" && mv -f "$RUN_DIR/task.md.tmp" "$RUN_DIR/task.md"
+  cp -f "$LIB" "$RUN_DIR/control/fusion-lib.sh"
+
+  # roles.json (hand-rolled; no jq dependency)
+  {
+    printf '{\n  "mode": "%s",\n  "slug": "%s",\n  "run_dir": "%s",\n  "created": "%s",\n  "roles": {\n' \
+      "$MODE" "$SLUG" "$RUN_DIR" "$(date -u +%FT%TZ)"
+    local i n="${#ROLES[@]}" role runtime
+    for i in "${!ROLES[@]}"; do
+      role="${ROLES[$i]%%:*}"; runtime="${ROLES[$i]##*:}"
+      printf '    "%s": { "runtime": "%s", "agent": "%s", "bootstrapper": %s }%s\n' \
+        "$(lc "$role")" "$runtime" "$(runtime_label "$runtime")" \
+        "$([[ $i == 0 ]] && echo true || echo false)" \
+        "$([[ $i -lt $((n-1)) ]] && echo , || echo '')"
+    done
+    printf '  }\n}\n'
+  } > "$RUN_DIR/control/roles.json"
+
+  {
+    echo "# Fusion run: $SLUG"; echo
+    echo "- Mode **$MODE** · started $(date -u +%FT%TZ)"
+    echo "- Harness: \`$HARNESS\` · shared lib: \`control/fusion-lib.sh\`"
+    echo "- Agents: $(for r in "${ROLES[@]}"; do printf '%s(%s) ' "${r%%:*}" "${r##*:}"; done)"
+    echo "- Watch live in the cockpit workspace named \`$SLUG\`."; echo
+    echo "Key files: \`task.md\` (immutable task), \`control/RUN.started\` / \`control/RUN.complete\` (lifecycle), \`FINAL.md\` (synthesis)."
+  } > "$RUN_DIR/README.md"
+}
+
+# --- spawn one agent pane -------------------------------------------------------
+WINID=""
+spawn_role() {
+  local role="$1" runtime="$2" boot="$3" first="$4" prompt cmd launch pane
+  prompt="$(build_prompt "$role" "$runtime" "$boot")"
+  # --auto uses each CLI's auto-approval mode (model self-checks when to ask) — NOT a
+  # full-autonomy sandbox bypass. Adequate for research/investigation runs.
+  case "$runtime" in
+    codex) launch="exec codex"; [[ "$AUTO" == 1 ]] && launch="exec codex -a on-request";;
+    *)     launch="exec claude"; [[ "$AUTO" == 1 ]] && launch="exec claude --permission-mode auto";;
+  esac
+  cmd="cd $(printf %q "$CWD") && $launch $(printf %q "$prompt")"
+
+  if [[ "$DRY" == 1 ]]; then
+    printf -- '--- %s (%s%s)%s ---\n' "$role" "$runtime" "$([[ $AUTO == 1 ]] && echo ',auto')" "$([[ $boot == 1 ]] && echo ' [bootstrapper]')"
+    printf '  cwd:    %s\n  launch: %s ...\n' "$CWD" "$launch"
+    printf '  prompt:\n'; printf '%s\n' "$prompt" | sed 's/^/    | /'
+    return
+  fi
+
+  if [[ "$first" == 1 ]]; then
+    pane=$($TMUX new-window -t "$SESSION" -n "$SLUG" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")")
+    WINID=$($TMUX display -p -t "$pane" '#{window_id}')
+  else
+    pane=$($TMUX split-window -t "$WINID" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")") \
+      || die "no room for another pane — widen the cockpit window"
+  fi
+  $TMUX set -p -t "$pane" @session_id ""
+  $TMUX set -p -t "$pane" @cwd "$CWD"
+  $TMUX set -p -t "$pane" @agent "$runtime"
+  $TMUX set -p -t "$pane" @born "$(date +%s)"
+  $TMUX set -p -t "$pane" @label "$SLUG · $(lc "$role")"
+  $TMUX set -p -t "$pane" @badge "fusion"
+}
+
+# --- run ------------------------------------------------------------------------
+scaffold
+
+if [[ "$DRY" != 1 ]]; then
+  $TMUX has-session -t "$SESSION" 2>/dev/null || die "cockpit grid not running — start it with: cockpit"
+fi
+
+first=1
+for i in "${!ROLES[@]}"; do
+  role="${ROLES[$i]%%:*}"; runtime="${ROLES[$i]##*:}"
+  spawn_role "$role" "$runtime" "$([[ $i == 0 ]] && echo 1 || echo 0)" "$first"
+  first=0
+done
+
+if [[ "$DRY" != 1 ]]; then
+  $TMUX select-layout -t "$WINID" "$LAYOUT" 2>/dev/null || true
+  $TMUX select-window -t "$WINID" 2>/dev/null || true
+  $TMUX display-message "fusion: $SLUG ($MODE) — ${#ROLES[@]} agents launched"
+fi
+
+echo "fusion: $SLUG (mode $MODE) → $RUN_DIR"
+echo "  agents: $(for r in "${ROLES[@]}"; do printf '%s(%s) ' "${r%%:*}" "${r##*:}"; done)"
+[[ "$AUTO" == 1 ]] && echo "  mode:   AUTONOMOUS (permission prompts skipped)" || echo "  mode:   interactive (you approve tool calls per pane)"
+[[ "$DRY" == 1 ]] && echo "  (dry run — nothing spawned)" || echo "  workspace: cockpit window '$SLUG' — switch with Alt-←/→"
