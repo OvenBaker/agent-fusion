@@ -9,6 +9,9 @@ Codex/GPT) on one task and fusing their output.
   `fusion_wait`); synchronous heartbeat, no background process.
 - **`fusion`** — launcher: scaffolds a run dir and opens a [cockpit](https://github.com/OvenBaker/cockpit)
   workspace with one pane per agent, each started with its role header + prompt.
+- **`skill/agent-fusion/SKILL.md`** — vendored copy of the `agent-fusion` skill (the bootstrapping
+  half: compose the brief, pick the mode, launch). Source of truth; installed to
+  `~/.claude/skills/agent-fusion/SKILL.md`. Re-copy after editing either side to keep them in sync.
 
 ```bash
 fusion --mode A <slug> task.md        # 2 agents: PRIMARY(claude) + SECONDARY(codex)

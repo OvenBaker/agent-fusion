@@ -154,6 +154,42 @@ scaffold() {
   } > "$RUN_DIR/README.md"
 }
 
+# --- pre-trust the working dir so neither CLI shows "do you trust this folder?" --
+# Fresh RUN_DIRs are never trusted, so each agent would otherwise stop on the trust
+# prompt. We write the exact records accepting the dialog produces — Codex:
+# [projects."<dir>"] trust_level="trusted" in ~/.codex/config.toml; Claude:
+# projects["<dir>"].hasTrustDialogAccepted=true in ~/.claude.json. Idempotent.
+pretrust_dir() {
+  local dir="$1" ctoml="$HOME/.codex/config.toml" cjson="$HOME/.claude.json"
+  if [[ "$DRY" == 1 ]]; then
+    printf '[dry] pre-trust %s in codex config.toml + claude.json\n' "$dir"; return
+  fi
+  # Codex
+  mkdir -p "$HOME/.codex"
+  if ! grep -qF "[projects.\"$dir\"]" "$ctoml" 2>/dev/null; then
+    printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$dir" >> "$ctoml"
+  fi
+  # Claude — safe JSON merge (skip silently if file is unreadable; never corrupt it)
+  [[ -f "$cjson" ]] && command -v python3 >/dev/null && python3 - "$cjson" "$dir" <<'PY' || true
+import json, os, sys, tempfile
+path, d = sys.argv[1], sys.argv[2]
+try:
+    cfg = json.load(open(path))
+except Exception:
+    sys.exit(0)
+ent = cfg.setdefault("projects", {}).setdefault(d, {})
+if ent.get("hasTrustDialogAccepted") is True and ent.get("projectOnboardingSeenCount", 0) >= 1:
+    sys.exit(0)
+ent["hasTrustDialogAccepted"] = True
+ent.setdefault("projectOnboardingSeenCount", 1)
+ent.setdefault("allowedTools", [])
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
+with os.fdopen(fd, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.replace(tmp, path)
+PY
+}
+
 # --- spawn one agent pane -------------------------------------------------------
 WINID=""
 spawn_role() {
@@ -191,6 +227,7 @@ spawn_role() {
 
 # --- run ------------------------------------------------------------------------
 scaffold
+pretrust_dir "$CWD"
 
 if [[ "$DRY" != 1 ]]; then
   $TMUX has-session -t "$SESSION" 2>/dev/null || die "cockpit grid not running — start it with: cockpit"
