@@ -41,6 +41,21 @@ on …", "draft the task for a fusion run". If they just ask *about* the harness
    if something is missing rather than inventing). For read-only work, say **read-only** plainly. Keep
    it tight and unambiguous — this is the contract every agent shares.
 
+   Three things a strong brief does that weak ones skip (this is where best-of-both is won or lost):
+   - **Name the 1–3 contestable axes** — the specific decisions you *want* the agents to disagree on
+     (e.g. an organizing metaphor, where a check sits in a flow). Say plainly they're open and must not
+     be flattened. This is the highest-leverage line in the brief: it's what turns parallel work into
+     best-of-both instead of two near-identical passes.
+   - **Declare the value prop** — pick one and say it, because it changes how the agents should diverge:
+     *cross-validation* (full redundant blind work over the same material — best for **ground-truth-heavy
+     audits/specs**, where two independent passes catch grounding errors; redundancy *is* the value,
+     don't engineer divergence) vs *approach-fusion* (two different framings fused — best for
+     **design/product runs**, where assigning divergent lenses pays). Don't over-formalize lens
+     assignment; just state which value prop the run is buying so the agents (and the arbiter) calibrate.
+   - **Prescribe grounding, not the conclusion.** Fix the facts, evidence standard, vocabulary, and
+     section skeleton; leave the verdict to the agents. Language like *recommended / the gap / must
+     adopt* in a brief pre-decides the answer and collapses the divergence you're paying for.
+
 5. **Choose a slug** — a short kebab-case run name (e.g. `valuno-reversal-probe`). It names the
    `RUN_DIR` (`~/agents/runs/<slug>`) and the cockpit workspace.
 
