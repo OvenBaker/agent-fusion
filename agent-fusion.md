@@ -92,6 +92,13 @@ tracks state and you can watch all agents' liveness/needs-input at a glance.
    **frame** — interfaces, data shapes, invariants, decomposition boundaries, naming, definition-of-done —
    then diverge freely on the **approach** (method, emphasis, analysis) *inside* that frame. Divergence
    in an interior is good. Divergence in a seam is the thing to forbid.
+   **Match divergence to the task's declared value prop.** A brief should say which of two it is buying
+   (see SKILL.md): *cross-validation* — full redundant blind work over the **same** material, the right
+   shape for ground-truth-heavy audits/specs where two independent passes catch grounding errors one
+   pass would ship; here redundancy *is* the value, so **don't manufacture divergence**. Or
+   *approach-fusion* — two genuinely **different** framings fused, the right shape for design/build
+   runs; here **preserve the approach divergence** and don't let the frozen frame flatten it. If the
+   brief doesn't say, infer it and state your read in the plan/orientation.
 3. **Dissent is mandatory, capitulation is not free.** When you review/respond to a peer or integrator
    artifact, either raise ≥1 concrete counter-proposal **or** give an explicit, reasoned "no
    divergence found, and here's why." Steelman your own discarded idea before conceding it. Bare
@@ -104,8 +111,13 @@ tracks state and you can watch all agents' liveness/needs-input at a glance.
 6. **Filesystem is the only bus.** If it isn't a file in `RUN_DIR`, peers can't see it.
 7. **Own your namespace; never touch a peer's.** Write only files tagged with your own lowercase slug.
    Never edit a peer's files. Never edit `task.md` (or a frozen contract) after it's set.
-8. **Marker-after-content.** Write the content file *completely*, then create its `DONE` marker. A
-   marker's presence is the contract that the content is finished and safe to read.
+8. **Marker-after-content, and DONE means frozen.** Write the content file *completely*, then create
+   its `DONE` marker — finalize with `fusion_done <artifact>` (writes the empty marker **and** a
+   fingerprint sidecar). A marker's presence is the contract that the content is finished and safe to
+   read. **After `DONE.<slug>` exists the artifact is immutable** — never edit `work.<slug>.md` (or any
+   DONE'd file) again. Late material goes in `work.<slug>.addendum.NNNN.md` + an `UPDATED.<slug>.NNNN`
+   marker, which the integrator picks up at fusion. A silent post-DONE edit is how a synthesis fuses a
+   stale read; the fingerprint makes it provable (`fusion_freshness` flags it STALE) instead of silent.
 9. **Resumable from disk.** Every phase/stage leaves durable artifacts. On (re)start, reconcile with
    `RUN_DIR` state — infer the current phase from which markers exist and resume there.
 10. **Surface, don't silently diverge.** On timeout, stalled peer, or disagreement past the cap, log
@@ -149,6 +161,11 @@ $RUN_DIR/
 
 No `*.hb.pid` files, no heartbeat scripts — there is no background heartbeat (§3).
 
+Integrity artifacts added by the helpers: `DONE.<slug>.fp` (fingerprint beside each content `DONE`),
+`work.<slug>.addendum.NNNN.md` + `UPDATED.<slug>.NNNN` (post-DONE additions, §1.8), `SPECULATIVE.<slug>`
+(pre-gate work the integrator must not fuse yet, §4), and `control/<slug>.signoff.skipped.md` (an
+unavailable worker's signoff stand-in, §B.9 / Phase 4).
+
 ---
 
 ## 3. File, slug & heartbeat conventions (BOTH modes)
@@ -171,6 +188,12 @@ No `*.hb.pid` files, no heartbeat scripts — there is no background heartbeat (
   runs in the background ⇒ nothing leaks. Call `fusion_log` liberally; at minimum at every transition.
 - **Markers are empty create-only files.** Presence = signal. Content first, marker last. Don't
   rewrite a marker; to supersede an artifact, version it (`merged.v2.md` + `DONE.merged.v2`) and log it.
+- **Finalize with `fusion_done`; the integrator checks freshness before fusing.** Create each content
+  `DONE` via `fusion_done <artifact>` (empty marker + `DONE.<slug>.fp` fingerprint). Before fusing a
+  stage, the integrator runs `fusion_freshness <stage_dir>` — it flags any artifact edited after its
+  `DONE` (STALE → re-read it), lists `*.addendum.*` files, and (with a cursor) shows what changed since
+  the last read. Never synthesize without it (§1.8). The fingerprint also makes the blind gate provable
+  after the fact rather than mtime-inferred.
 - **Atomic-ish writes.** If you can, write `path.tmp` then `mv -f path.tmp path`. Either way, the
   marker-after-content rule (§1.8) is the real guarantee.
 
@@ -193,6 +216,14 @@ fusion_wait "$RUN_DIR/contract/DONE.frozen" "$RUN_DIR/control/worker_a.alive"   
   a run dies waiting. (Mode A SECONDARY can't integrate, so if PRIMARY is truly gone it pauses and
   alerts; otherwise it keeps producing its own work.)
 - Scale `timeout` to the step (a 4-hour build milestone needs a longer wait than a 5-minute plan).
+- **Stage gates are real, not advisory.** Before *consuming* a prior stage's fused output — or starting
+  next-stage work that a binding decision/steering controls — confirm the gate with
+  `fusion_gate <synthesis-or-merged marker> [binding decision/steering marker]`. If you keep momentum
+  before the gate clears, mark the artifact **speculative** (`stages/sNN/SPECULATIVE.<slug>`): the
+  integrator must **not** fuse speculative work until you clear the gate, re-validate against the now
+  published synthesis/steering, and replace it with a normal `fusion_done`. (Non-seam interior work in
+  Mode B still never blocks — this gates *consuming fused output* and *gated* next-stage work, not your
+  independent interior.)
 
 ## 5. Human controls (BOTH modes)
 
@@ -224,7 +255,8 @@ mandatory dissent, non-empty `decisions/`) keep it from collapsing into lockstep
 
 ### Phase 1 — Independent planning (BLIND)
 Each writes `plan/plan.<slug>.md` (decomposition, division of labour, dependencies, risks, isolation
-per §6), then `plan/DONE.<slug>`. **Read the peer's plan only once both `DONE` markers exist.**
+per §6), then finalizes with `fusion_done plan/plan.<slug>.md`. **Read the peer's plan only once both
+`DONE` markers exist.**
 
 ### Phase 2 — Plan fusion (PRIMARY) + mandatory review (SECONDARY)
 **PRIMARY:** wait for both; write `plan/plan.merged.md` (the contract) listing **Agreements /
@@ -233,15 +265,22 @@ Divergences (your choice + why) / Gaps**; converge the *frame*, preserve *approa
 (§1.3)**. **PRIMARY:** revise if warranted; create `plan/MERGED.final`. Contract frozen.
 
 ### Phase 3 — Staged execution loop
-For each `sNN`: **both (BLIND)** write `stages/sNN/work.<slug>.md` + `DONE.<slug>` (read peer only once
-both exist); **PRIMARY** fuses → `stages/sNN/merged.md` (ending with a preservation ledger, §1.11) +
-`DONE.merged`. **Checkpoint is not a solo
-call** — open a decision and get SECONDARY's countersignature (`decisions/` must not be empty, §1.4).
-Honour `HOLD`. **SECONDARY** waits for `DONE.merged` + the resolved decision before the next stage.
+For each `sNN`: **both (BLIND)** write `stages/sNN/work.<slug>.md`, then finalize with
+`fusion_done stages/sNN/work.<slug>.md` (read peer only once both `DONE` markers exist); **PRIMARY**
+runs `fusion_freshness stages/sNN` (re-read anything STALE; pick up any `*.addendum.*`), then fuses →
+`stages/sNN/merged.md` (ending with a preservation ledger, §1.11) + `DONE.merged`. **Checkpoint is not
+a solo call** — open a decision and get SECONDARY's countersignature (`decisions/` must not be empty,
+§1.4). Honour `HOLD`. **SECONDARY** gates the next stage on `DONE.merged` + the resolved decision
+(`fusion_gate stages/sNN/DONE.merged decisions/NNNN.resolved.md`) — work started before that is
+`SPECULATIVE.secondary` and is not fused until re-validated (§4).
 
 ### Phase 4 — Finalization (PRIMARY)
-Write `FINAL.md`; **then** `control/RUN.complete` (last artifact — never before deliverables exist).
-SECONDARY may write `control/secondary.signoff`, then stop.
+Write `FINAL.md`; verify the run is finishable —
+`fusion_can_complete "$RUN_DIR/FINAL.md" $RUN_DIR/stages/*/DONE.merged "$RUN_DIR/control/secondary.signoff"`
+**must PASS** — **then** `control/RUN.complete` (last artifact — never before deliverables + signoff
+exist). SECONDARY writes a non-empty `control/secondary.signoff` (concur/dissent + ≥1 reason); if it
+must stop early, PRIMARY records `control/secondary.signoff.skipped.md` with a reason so completion
+isn't blocked on a gone peer.
 
 ### Decision protocol (Mode A)
 1. **Open** `decisions/NNNN.proposal.<slug>.md` (context, options, recommendation, default-if-silent).
@@ -295,7 +334,7 @@ divergence budget: diverge where it adds signal, converge where it must be compa
 
 ## B.5 Phase 1 — Blind plans + independent orientation
 - **Both workers (BLIND):** `plan/plan.<slug>.md` (decomposition, seams foreseen, approach, risks);
-  `plan/DONE.<slug>`.
+  finalize with `fusion_done plan/plan.<slug>.md`.
 - **ARBITER (independent read):** *while* workers plan, write `plan/orientation.arbiter.md` — your own
   view of the seams/invariants. **Folie-à-deux guard:** gives you a reference frame to catch both
   workers being wrong the same way. You build nothing from it.
@@ -325,9 +364,10 @@ that seam-work** while progressing other interior work. Non-seam work never bloc
 
 **Fusion cadence:** *seams fuse continuously* (the moment a seam decision forms, the ARBITER reconciles
 it — publishing the reconciled seam *is* the steer). *Interiors fuse at milestones* — at each
-`stages/sNN/` the workers write `work.<slug>.md` + `DONE.<slug>` (BLIND of each other), and the ARBITER
-writes `stages/sNN/synthesis.md` (the heavy best-of-both synthesis), ending with a **preservation
-ledger** (§1.11): kept-from-A / kept-from-B / dropped-and-why.
+`stages/sNN/` the workers write `work.<slug>.md` then finalize with `fusion_done` (BLIND of each other),
+and the ARBITER runs `fusion_freshness stages/sNN` (re-read anything STALE; pick up any `*.addendum.*`)
+**before** writing `stages/sNN/synthesis.md` (the heavy best-of-both synthesis), ending with a
+**preservation ledger** (§1.11): kept-from-A / kept-from-B / dropped-and-why.
 
 ## B.8 The conductor control loop (ARBITER)
 Event-driven — wake on a new beacon (`fusion_watch_sweep`), a `NEED-RULING` tripwire, or a milestone.
@@ -351,8 +391,12 @@ steer must be challengeable — and if you're issuing those, you're over-steerin
 ## B.9 Phase 4 — Final synthesis (ARBITER)
 At the final milestone, write the deliverables' synthesis and `FINAL.md` (neutral best-of-both — no
 author bias, since you built neither interior), verify the contract's DoD, and include the final
-**preservation ledger** (§1.11) so no worker's good material is dropped unremarked; **then**
-`control/RUN.complete`. Workers write `control/<slug>.signoff` (optional dissent) and stop.
+**preservation ledger** (§1.11) so no worker's good material is dropped unremarked. Before the
+completion marker, confirm the run is finishable —
+`fusion_can_complete "$RUN_DIR/FINAL.md" $RUN_DIR/stages/*/DONE.synthesis "$RUN_DIR/control/worker_a.signoff" "$RUN_DIR/control/worker_b.signoff"`
+**must PASS**; **then** `control/RUN.complete`. Workers write a non-empty `control/<slug>.signoff`
+(concur/dissent + ≥1 reason); for an unavailable worker the ARBITER records
+`control/<slug>.signoff.skipped.md` with a reason so completion isn't blocked on a gone peer.
 
 ## B.10 Over-steer audit (the new failure mode)
 An over-active ARBITER collapses divergence → new lockstep with a new boss. Detectable, because every
@@ -388,5 +432,8 @@ over-steer self-audit → `FINAL.md` → `RUN.complete`.
 
 **Everyone, always:** `source ~/agents/fusion-lib.sh`; lowercase slug in every filename; heartbeat is
 synchronous via `fusion_log` (no background process); blind-first gated on markers; converge frame /
-diverge approach; dissent is mandatory; own your namespace; marker-after-content; keep working your own
-thread if a peer stalls; watch HOLD/ABORT; on (re)start, reconcile with disk and resume.
+diverge approach (matched to the task's value prop); dissent is mandatory; own your namespace; finalize
+with `fusion_done` and treat DONE as frozen (addenda, never edits); integrator runs `fusion_freshness`
+before fusing and `fusion_can_complete` before `RUN.complete`; gate next-stage consumption with
+`fusion_gate`; keep working your own thread if a peer stalls; watch HOLD/ABORT; on (re)start, reconcile
+with disk and resume.
