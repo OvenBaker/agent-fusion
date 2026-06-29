@@ -27,3 +27,7 @@ Part of a trio: **[santa](https://github.com/OvenBaker/santa)** (search & resume
 Claude + Codex history) and **[cockpit](https://github.com/OvenBaker/cockpit)** (drive
 many live sessions at once). See **[agent-tooling](https://github.com/OvenBaker/agent-tooling)**
 for how they fit together.
+
+## License
+
+[The Unlicense](LICENSE) — released into the public domain. Do whatever you want.
