@@ -1,4 +1,4 @@
-# agents
+# agent-fusion
 
 Tooling for **Agent Fusion** — running multiple independent agents (Claude/Opus +
 Codex/GPT) on one task and fusing their output.
@@ -20,3 +20,10 @@ fusion <slug> task.md --dry-run       # preview scaffold + prompts; spawn nothin
 ```
 
 Runs live under `runs/<slug>/` (gitignored — the filesystem is the coordination bus).
+
+---
+
+Part of a trio: **[santa](https://github.com/OvenBaker/santa)** (search & resume your
+Claude + Codex history) and **[cockpit](https://github.com/OvenBaker/cockpit)** (drive
+many live sessions at once). See **[agent-tooling](https://github.com/OvenBaker/agent-tooling)**
+for how they fit together.
