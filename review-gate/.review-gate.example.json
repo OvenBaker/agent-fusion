@@ -1,0 +1,27 @@
+{
+  "reviewer": {
+    "command": "node",
+    "args": ["{{CODEX}}", "adversarial-review", "--wait", "--scope", "working-tree", "{{PROMPT}}"],
+    "stageUntracked": true
+  },
+  "categories": [
+    "authorization",
+    "consent",
+    "trust-boundary",
+    "state-machine",
+    "cache-identity",
+    "provider-failure-taxonomy",
+    "migration-data-integrity",
+    "retry-recovery",
+    "invariant-guard-coverage",
+    "test-quality"
+  ],
+  "budgets": { "S": 1, "M": 1, "L": 2 },
+  "verifyFromRound": 3,
+  "floor": {
+    "blockingSeverities": ["critical"],
+    "blockingCategories": ["authorization", "trust-boundary"]
+  },
+  "stateDir": ".review-gate",
+  "followupsFile": "FOLLOWUPS.md"
+}
